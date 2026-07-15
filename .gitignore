@@ -1,0 +1,31 @@
+# Maven / build output
+target/
+
+# Runtime / crash logs
+*.log
+logs/
+hs_err_pid*
+replay_pid*
+
+# Environment
+.env
+.env.*
+!.env.example
+src/main/resources/application.yml
+src/main/resources/application.properties
+application-local.yml
+application-local.properties
+
+# IDE / project metadata
+.idea/
+.vscode/
+*.iml
+.classpath
+.project
+.settings/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
