@@ -38,12 +38,21 @@ public final class AiDtos {
 
     public record AiResultMessage(
             @NotBlank String messageId,
+            String requestMessageId,
+            String eventType,
             @NotNull Long taskId,
+            String taskType,
+            String deviceCode,
+            String deviceType,
+            String occurredAt,
+            String sentAt,
             @NotBlank String resultStatus,
-            Map<String, Object> detections,
-            Map<String, Object> prediction,
-            Map<String, Object> model,
-            String errorMessage
+            Object detections,
+            Object prediction,
+            Object model,
+            String errorMessage,
+            Object rawResult,
+            String finishedAt
     ) {
     }
 }
