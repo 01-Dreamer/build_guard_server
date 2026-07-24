@@ -30,7 +30,10 @@ public final class AiDtos {
             Long taskId,
             String taskType,
             Long deviceId,
+            String deviceCode,
+            String deviceType,
             Long sourceFileId,
+            Map<String, Object> sourceFile,
             LocalDateTime occurredAt,
             Map<String, Object> payload
     ) {
@@ -51,6 +54,7 @@ public final class AiDtos {
             Object prediction,
             Object model,
             String errorMessage,
+            Object annotatedImage,
             Object rawResult,
             String finishedAt
     ) {

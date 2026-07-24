@@ -17,7 +17,7 @@ spring:
       database: ${REDIS_DATABASE:0}
       timeout: 10s
   rabbitmq:
-    host: ${RABBITMQ_HOST:127.0.0.1}
+    host: ${RABBITMQ_HOST:110.41.166.11}
     port: ${RABBITMQ_PORT:5672}
     username: ${RABBITMQ_USERNAME:guest}
     password: ${RABBITMQ_PASSWORD:guest}
@@ -38,8 +38,16 @@ spring:
             enable: true
 
 buildguard:
+  public-base-url: ${BUILDGUARD_PUBLIC_BASE_URL:http://110.41.166.11:18080}
   ai:
     base-url: ${BUILDGUARD_AI_BASE_URL:http://127.0.0.1:19090}
+  sim:
+    enabled: ${BUILDGUARD_SIM_ENABLED:true}
+    base-url: ${BUILDGUARD_SIM_BASE_URL:http://127.0.0.1:19099}
+    poll-interval-ms: ${BUILDGUARD_SIM_POLL_INTERVAL_MS:3000}
+  storage:
+    local-root: ${BUILDGUARD_STORAGE_LOCAL_ROOT:data/uploads}
+    public-base-url: ${BUILDGUARD_STORAGE_PUBLIC_BASE_URL:http://127.0.0.1:18080}
 
 aliyun:
   oss:
@@ -47,3 +55,14 @@ aliyun:
     accessKeyId: ${ALIYUN_OSS_ACCESS_KEY_ID:}
     accessKeySecret: ${ALIYUN_OSS_ACCESS_KEY_SECRET:}
     bucketName: ${ALIYUN_OSS_BUCKET:buildguard-dev}
+
+payment:
+  alipay:
+    gateway-url: ${ALIPAY_GATEWAY_URL:https://openapi-sandbox.dl.alipaydev.com/gateway.do}
+    format: ${ALIPAY_FORMAT:json}
+    charset: ${ALIPAY_CHARSET:UTF-8}
+    sign-type: ${ALIPAY_SIGN_TYPE:RSA2}
+    app-id: ${ALIPAY_APP_ID:}
+    private-key: ${ALIPAY_PRIVATE_KEY:}
+    public-key: ${ALIPAY_PUBLIC_KEY:}
+    notify-url: ${ALIPAY_NOTIFY_URL:http://110.41.166.11:18080/api/payments/alipay/notify}
