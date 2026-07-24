@@ -52,9 +52,40 @@ public final class PersonnelDtos {
             String violationItem,
             BigDecimal fineAmount,
             Integer paymentStatus,
+            Long sourceAlarmId,
+            String snapshotUrl,
+            Integer reviewStatus,
             LocalDateTime occurredAt,
             String remark,
             LocalDateTime createdAt
+    ) {
+    }
+
+    public record ViolationReviewRequest(
+            Long personnelId,
+            BigDecimal fineAmount,
+            Integer paymentStatus,
+            String remark
+    ) {
+    }
+
+    public record ViolationFineRequest(
+            Long personnelId,
+            BigDecimal fineAmount,
+            String remark,
+            Boolean revoked
+    ) {
+    }
+
+    public record PaymentOrderView(
+            Long id,
+            Long violationId,
+            String outTradeNo,
+            BigDecimal amount,
+            String subject,
+            String qrCode,
+            Integer payStatus,
+            LocalDateTime expireAt
     ) {
     }
 }

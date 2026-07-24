@@ -6,9 +6,11 @@ import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.zxylearn.build_guard_server.common.BusinessException;
 import com.zxylearn.build_guard_server.common.PageResult;
 import com.zxylearn.build_guard_server.dto.PageDtos.AiRiskView;
+import com.zxylearn.build_guard_server.dto.PageDtos.AiRiskReviewRequest;
 import com.zxylearn.build_guard_server.dto.PageDtos.AlarmHandleRequest;
 import com.zxylearn.build_guard_server.dto.PageDtos.AlarmView;
 import com.zxylearn.build_guard_server.dto.PageDtos.CameraView;
+import com.zxylearn.build_guard_server.dto.PageDtos.CameraVideoView;
 import com.zxylearn.build_guard_server.dto.PageDtos.ChartPoint;
 import com.zxylearn.build_guard_server.dto.PageDtos.DashboardOverview;
 import com.zxylearn.build_guard_server.dto.PageDtos.DeviceCard;
@@ -32,12 +34,14 @@ import com.zxylearn.build_guard_server.entity.DeviceAsset;
 import com.zxylearn.build_guard_server.entity.DeviceLocation;
 import com.zxylearn.build_guard_server.entity.DeviceOnlineRecord;
 import com.zxylearn.build_guard_server.entity.DeviceType;
+import com.zxylearn.build_guard_server.entity.FileResource;
 import com.zxylearn.build_guard_server.entity.MonitorPoint;
 import com.zxylearn.build_guard_server.entity.MonitorRule;
 import com.zxylearn.build_guard_server.entity.Personnel;
 import com.zxylearn.build_guard_server.entity.SprayRecord;
 import com.zxylearn.build_guard_server.entity.SprayTask;
 import com.zxylearn.build_guard_server.entity.TowerWorkRecord;
+import com.zxylearn.build_guard_server.entity.ViolationRecord;
 import com.zxylearn.build_guard_server.mapper.AiDetectionRecordMapper;
 import com.zxylearn.build_guard_server.mapper.AlarmHandleRecordMapper;
 import com.zxylearn.build_guard_server.mapper.AlarmRecordMapper;
@@ -46,12 +50,14 @@ import com.zxylearn.build_guard_server.mapper.DeviceAssetMapper;
 import com.zxylearn.build_guard_server.mapper.DeviceLocationMapper;
 import com.zxylearn.build_guard_server.mapper.DeviceOnlineRecordMapper;
 import com.zxylearn.build_guard_server.mapper.DeviceTypeMapper;
+import com.zxylearn.build_guard_server.mapper.FileResourceMapper;
 import com.zxylearn.build_guard_server.mapper.MonitorPointMapper;
 import com.zxylearn.build_guard_server.mapper.MonitorRuleMapper;
 import com.zxylearn.build_guard_server.mapper.PersonnelMapper;
 import com.zxylearn.build_guard_server.mapper.SprayRecordMapper;
 import com.zxylearn.build_guard_server.mapper.SprayTaskMapper;
 import com.zxylearn.build_guard_server.mapper.TowerWorkRecordMapper;
+import com.zxylearn.build_guard_server.mapper.ViolationRecordMapper;
 import org.bson.Document;
 import org.springframework.data.domain.Sort;
 import org.springframework.data.mongodb.core.MongoTemplate;
@@ -102,6 +108,8 @@ public class PlatformPageService {
     private final PersonnelMapper personnelMapper;
     private final TowerWorkRecordMapper towerWorkRecordMapper;
     private final CameraDeviceProfileMapper cameraDeviceProfileMapper;
+    private final FileResourceMapper fileResourceMapper;
+    private final ViolationRecordMapper violationRecordMapper;
     private final MongoTemplate mongoTemplate;
 
     public PlatformPageService(DeviceAssetMapper deviceAssetMapper,
@@ -118,6 +126,8 @@ public class PlatformPageService {
                                PersonnelMapper personnelMapper,
                                TowerWorkRecordMapper towerWorkRecordMapper,
                                CameraDeviceProfileMapper cameraDeviceProfileMapper,
+                               FileResourceMapper fileResourceMapper,
+                               ViolationRecordMapper violationRecordMapper,
                                MongoTemplate mongoTemplate) {
         this.deviceAssetMapper = deviceAssetMapper;
         this.deviceTypeMapper = deviceTypeMapper;
@@ -133,6 +143,8 @@ public class PlatformPageService {
         this.personnelMapper = personnelMapper;
         this.towerWorkRecordMapper = towerWorkRecordMapper;
         this.cameraDeviceProfileMapper = cameraDeviceProfileMapper;
+        this.fileResourceMapper = fileResourceMapper;
+        this.violationRecordMapper = violationRecordMapper;
         this.mongoTemplate = mongoTemplate;
     }
 
@@ -145,7 +157,7 @@ public class PlatformPageService {
         Integer aiRisks = Math.toIntExact(aiDetectionRecordMapper.selectCount(null));
         DeviceAsset environmentDevice = firstDeviceByType("environment_sensor");
         List<MetricValue> environment = environmentDevice == null
-                ? metricValues("environment_sensor", demoMetrics("environment_sensor", "ENV-DEMO", 0))
+                ? metricValues("environment_sensor", demoMetrics("environment_sensor", "ENV-DEMO", demoTick()))
                 : realtimeMetrics(environmentDevice);
 
         return new DashboardOverview(
@@ -560,33 +572,34 @@ public class PlatformPageService {
         Map<Long, DeviceAsset> deviceMap = deviceMap();
         Map<Long, Personnel> personnelMap = personnelMapper.selectList(null).stream()
                 .collect(Collectors.toMap(Personnel::getId, Function.identity(), (left, right) -> left));
-        Map<Long, AlarmRecord> alarmByPersonnel = alarmRecordMapper.selectList(
-                        Wrappers.<AlarmRecord>lambdaQuery()
-                                .eq(AlarmRecord::getAlarmType, "ai")
-                                .orderByDesc(AlarmRecord::getOccurredAt)
-                )
-                .stream()
-                .filter(alarm -> alarm.getPersonnelId() != null)
-                .collect(Collectors.toMap(AlarmRecord::getPersonnelId, Function.identity(), (left, right) -> left));
         Map<Long, AlarmHandleRecord> latestHandles = latestHandles();
-        List<AiRiskView> filtered = aiDetectionRecordMapper.selectList(
-                        Wrappers.<AiDetectionRecord>lambdaQuery().orderByDesc(AiDetectionRecord::getOccurredAt)
-                )
+        List<AiDetectionRecord> detections = aiDetectionRecordMapper.selectList(
+                Wrappers.<AiDetectionRecord>lambdaQuery().orderByDesc(AiDetectionRecord::getOccurredAt)
+        );
+        Map<Long, AlarmRecord> alarmMap = detections.stream()
+                .map(AiDetectionRecord::getSourceAlarmId)
+                .filter(java.util.Objects::nonNull)
+                .distinct()
+                .collect(Collectors.collectingAndThen(Collectors.toList(), ids -> ids.isEmpty()
+                        ? Map.<Long, AlarmRecord>of()
+                        : alarmRecordMapper.selectBatchIds(ids).stream()
+                        .collect(Collectors.toMap(AlarmRecord::getId, Function.identity(), (left, right) -> left))));
+        Map<Long, FileResource> snapshotMap = detections.stream()
+                .map(AiDetectionRecord::getSnapshotFileId)
+                .filter(java.util.Objects::nonNull)
+                .distinct()
+                .collect(Collectors.collectingAndThen(Collectors.toList(), ids -> ids.isEmpty()
+                        ? Map.<Long, FileResource>of()
+                        : fileResourceMapper.selectBatchIds(ids).stream()
+                        .collect(Collectors.toMap(FileResource::getId, Function.identity(), (left, right) -> left))));
+        List<AiRiskView> filtered = detections
                 .stream()
                 .map(record -> {
                     DeviceAsset device = record.getCameraDeviceId() == null ? null : deviceMap.get(record.getCameraDeviceId());
                     Personnel personnel = record.getPersonnelId() == null ? null : personnelMap.get(record.getPersonnelId());
-                    AlarmRecord alarm = record.getPersonnelId() == null ? null : alarmByPersonnel.get(record.getPersonnelId());
-                    if (alarm == null && record.getTaskId() != null) {
-                        alarm = alarmRecordMapper.selectOne(
-                                Wrappers.<AlarmRecord>lambdaQuery()
-                                        .eq(AlarmRecord::getAlarmType, "ai")
-                                        .eq(AlarmRecord::getDeviceId, record.getCameraDeviceId())
-                                        .orderByDesc(AlarmRecord::getOccurredAt)
-                                        .last("LIMIT 1")
-                        );
-                    }
+                    AlarmRecord alarm = record.getSourceAlarmId() == null ? null : alarmMap.get(record.getSourceAlarmId());
                     AlarmHandleRecord handle = alarm == null ? null : latestHandles.get(alarm.getId());
+                    FileResource snapshot = record.getSnapshotFileId() == null ? null : snapshotMap.get(record.getSnapshotFileId());
                     return new AiRiskView(
                             record.getId(),
                             record.getTaskId(),
@@ -599,6 +612,7 @@ public class PlatformPageService {
                             doubleValue(record.getConfidence()),
                             record.getResultJson(),
                             record.getOccurredAt(),
+                            snapshot == null ? null : snapshot.getUrl(),
                             alarm == null ? null : alarm.getId(),
                             alarm == null ? null : alarm.getAlarmLevel(),
                             alarm == null ? null : alarm.getStatus(),
@@ -615,6 +629,98 @@ public class PlatformPageService {
         int from = Math.min((safePage - 1) * safePageSize, filtered.size());
         int to = Math.min(from + safePageSize, filtered.size());
         return new PageResult<>(filtered.subList(from, to), filtered.size(), safePage, safePageSize);
+    }
+
+    public Long reviewAiRisk(long detectionId, AiRiskReviewRequest request) {
+        AiDetectionRecord detection = aiDetectionRecordMapper.selectById(detectionId);
+        if (detection == null) {
+            throw new BusinessException(404, "AI风险记录不存在");
+        }
+        AlarmRecord alarm = detection.getSourceAlarmId() == null ? null : alarmRecordMapper.selectById(detection.getSourceAlarmId());
+        if (alarm == null) {
+            alarm = createMissingAiAlarm(detection);
+        }
+        if (Integer.valueOf(2).equals(alarm.getStatus())) {
+            ViolationRecord existing = violationRecordMapper.selectOne(Wrappers.<ViolationRecord>lambdaQuery()
+                    .eq(ViolationRecord::getSourceAlarmId, alarm.getId())
+                    .last("limit 1"));
+            return existing == null ? null : existing.getId();
+        }
+
+        String decision = request.decision() == null || request.decision().isBlank() ? "approve" : request.decision().trim();
+        boolean approved = !"reject".equalsIgnoreCase(decision);
+        ViolationRecord violation = violationRecordMapper.selectOne(Wrappers.<ViolationRecord>lambdaQuery()
+                .eq(ViolationRecord::getSourceAlarmId, alarm.getId())
+                .last("limit 1"));
+        Long violationId = null;
+        if (approved) {
+            Long personnelId = request.personnelId() == null ? detection.getPersonnelId() : request.personnelId();
+            if (personnelId == null) {
+                throw new BusinessException(400, "审核通过前请选择违规人员");
+            }
+            if (personnelMapper.selectById(personnelId) == null) {
+                throw new BusinessException(400, "人员不存在");
+            }
+            boolean insert = violation == null;
+            if (violation == null) {
+                violation = new ViolationRecord();
+                violation.setSourceAlarmId(alarm.getId());
+                violation.setCreatedAt(LocalDateTime.now());
+            }
+            violation.setPersonnelId(personnelId);
+            violation.setViolationItem(aiViolationName(detection.getDetectType()));
+            violation.setFineAmount(request.fineAmount() == null ? defaultFine(detection.getDetectType()) : request.fineAmount());
+            violation.setPaymentStatus(0);
+            violation.setOccurredAt(detection.getOccurredAt() == null ? LocalDateTime.now() : detection.getOccurredAt());
+            violation.setRemark(request.remark() == null || request.remark().isBlank() ? "AI风险审核通过，生成罚款记录" : request.remark().trim());
+            violation.setReviewStatus(1);
+            violation.setUpdatedAt(LocalDateTime.now());
+            if (insert) {
+                violationRecordMapper.insert(violation);
+            } else {
+                violationRecordMapper.updateById(violation);
+            }
+            violationId = violation.getId();
+        } else if (violation != null) {
+            violation.setReviewStatus(2);
+            violation.setPaymentStatus(3);
+            violation.setRemark(request.remark() == null || request.remark().isBlank() ? "AI风险审核驳回" : request.remark().trim());
+            violation.setUpdatedAt(LocalDateTime.now());
+            violationRecordMapper.updateById(violation);
+        }
+
+        alarm.setStatus(2);
+        alarmRecordMapper.updateById(alarm);
+
+        AlarmHandleRecord handle = new AlarmHandleRecord();
+        handle.setAlarmId(alarm.getId());
+        handle.setHandleBy("系统管理员");
+        handle.setHandleContent(approved
+                ? "AI风险审核通过，已生成罚款记录"
+                : "AI风险审核驳回：" + (request.remark() == null ? "" : request.remark().trim()));
+        handle.setHandledAt(LocalDateTime.now());
+        alarmHandleRecordMapper.insert(handle);
+
+        return violationId;
+    }
+
+    private AlarmRecord createMissingAiAlarm(AiDetectionRecord detection) {
+        AlarmRecord alarm = new AlarmRecord();
+        alarm.setAlarmType("ai");
+        alarm.setAlarmLevel("warn");
+        alarm.setDeviceId(detection.getCameraDeviceId());
+        alarm.setPersonnelId(detection.getPersonnelId());
+        alarm.setContent("AI识别到" + aiViolationName(detection.getDetectType()));
+        alarm.setAlarmValue(detection.getConfidence());
+        alarm.setOccurredAt(detection.getOccurredAt() == null ? LocalDateTime.now() : detection.getOccurredAt());
+        alarm.setStatus(0);
+        alarm.setSnapshotFileId(detection.getSnapshotFileId());
+        alarm.setCreatedAt(LocalDateTime.now());
+        alarmRecordMapper.insert(alarm);
+
+        detection.setSourceAlarmId(alarm.getId());
+        aiDetectionRecordMapper.updateById(detection);
+        return alarm;
     }
 
     private Map<Long, AlarmHandleRecord> latestHandles() {
@@ -644,9 +750,10 @@ public class PlatformPageService {
                 .map(device -> {
                     DeviceLocation location = device.getLocationId() == null ? null : locationMap.get(device.getLocationId());
                     CameraDeviceProfile profile = profileMap.get(device.getId());
-                    Document latestFrame = latestCameraFrame(device.getCode());
+                    Document latestFrame = freshCameraFrame(device.getCode());
                     String latestCameraSource = firstString(latestFrame, "payload.cameraSource", "normalized.cameraSource").orElse(null);
                     String profileCameraSource = profile == null ? null : profile.getCameraSource();
+                    Integer effectiveOnlineStatus = latestFrame == null ? 0 : 1;
                     return new CameraView(
                             device.getId(),
                             device.getName(),
@@ -654,10 +761,10 @@ public class PlatformPageService {
                             location == null ? null : location.getName(),
                             latestCameraSource != null ? latestCameraSource : profileCameraSource,
                             profile != null && profile.getAiMonitorTypes() != null ? profile.getAiMonitorTypes() : "helmet,vest,smoke,fire",
-                            device.getOnlineStatus(),
+                            effectiveOnlineStatus,
                             profile != null && profile.getEnabled() != null ? profile.getEnabled() : device.getEnabled(),
                             snapshotUrl(device.getCode(), latestFrame),
-                            streamUrl(device.getCode())
+                            streamUrl(device.getCode(), latestFrame)
                     );
                 })
                 .toList();
@@ -665,7 +772,7 @@ public class PlatformPageService {
     }
 
     public Optional<CameraSnapshot> cameraSnapshot(String cameraCode) {
-        Document latestFrame = latestCameraFrame(cameraCode);
+        Document latestFrame = freshCameraFrame(cameraCode);
         if (latestFrame == null) {
             return Optional.empty();
         }
@@ -691,6 +798,46 @@ public class PlatformPageService {
     }
 
     public record CameraSnapshot(Path path, String contentType, String version) {
+    }
+
+    public PageResult<CameraVideoView> cameraVideos(String cameraCode, String startTime, String endTime, int page, int pageSize) {
+        int safePage = safePage(page);
+        int safePageSize = safePageSize(pageSize);
+        Map<Long, DeviceAsset> deviceMap = deviceMap();
+        List<Long> cameraIds = cameraCode == null || cameraCode.isBlank()
+                ? List.of()
+                : idsByCode(cameraCode);
+        if (cameraCode != null && !cameraCode.isBlank() && cameraIds.isEmpty()) {
+            return new PageResult<>(List.of(), 0, safePage, safePageSize);
+        }
+
+        List<FileResource> filtered = fileResourceMapper.selectList(Wrappers.<FileResource>lambdaQuery()
+                        .eq(FileResource::getBizType, "camera_video")
+                        .in(!cameraIds.isEmpty(), FileResource::getBizId, cameraIds)
+                        .orderByDesc(FileResource::getCreatedAt))
+                .stream()
+                .filter(file -> inDateRange(file.getCreatedAt(), startTime, endTime))
+                .toList();
+        int from = Math.min((safePage - 1) * safePageSize, filtered.size());
+        int to = Math.min(from + safePageSize, filtered.size());
+        List<CameraVideoView> records = filtered.subList(from, to).stream()
+                .map(file -> {
+                    DeviceAsset camera = file.getBizId() == null ? null : deviceMap.get(file.getBizId());
+                    return new CameraVideoView(
+                            file.getId(),
+                            file.getBizId(),
+                            camera == null ? null : camera.getCode(),
+                            camera == null ? null : camera.getName(),
+                            file.getUrl(),
+                            file.getObjectKey(),
+                            file.getFileName(),
+                            file.getContentType(),
+                            file.getSizeBytes(),
+                            file.getCreatedAt()
+                    );
+                })
+                .toList();
+        return new PageResult<>(records, filtered.size(), safePage, safePageSize);
     }
 
     private DeviceMonitorView deviceMonitor(DeviceAsset device, Map<Long, DeviceType> typeMap) {
@@ -751,11 +898,11 @@ public class PlatformPageService {
                     Document.class,
                     collection
             );
-            if (latest != null) {
+            if (latest != null && isFreshTelemetry(latest)) {
                 return metricValues(typeCode, valuesFromDocument(latest, typeCode, device.getCode(), 0));
             }
         }
-        return metricValues(typeCode, demoMetrics(typeCode, device.getCode(), 0));
+        return metricValues(typeCode, demoMetrics(typeCode, device.getCode(), demoTick()));
     }
 
     private List<ChartPoint> telemetryHistory(DeviceAsset device, int limit) {
@@ -832,6 +979,10 @@ public class PlatformPageService {
         return LocalDateTime.now();
     }
 
+    private boolean isFreshTelemetry(Document document) {
+        return !documentTime(document).isBefore(LocalDateTime.now().minusSeconds(15));
+    }
+
     private Map<String, Double> demoMetrics(String typeCode, String deviceCode, int index) {
         int seed = Math.abs((deviceCode == null ? typeCode : deviceCode).hashCode() % 17);
         double wave = Math.sin((seed + index) / 3.0);
@@ -880,6 +1031,10 @@ public class PlatformPageService {
             default -> values.put("status", 1.0);
         }
         return values;
+    }
+
+    private int demoTick() {
+        return (int) ((System.currentTimeMillis() / 3000L) % 100000);
     }
 
     private List<MetricValue> metricValues(String typeCode, Map<String, Double> values) {
@@ -1110,6 +1265,11 @@ public class PlatformPageService {
         return mongoTemplate.findOne(query, Document.class, CAMERA_FRAME_COLLECTION);
     }
 
+    private Document freshCameraFrame(String deviceCode) {
+        Document latestFrame = latestCameraFrame(deviceCode);
+        return latestFrame != null && isFreshTelemetry(latestFrame) ? latestFrame : null;
+    }
+
     private String snapshotUrl(String deviceCode, Document latestFrame) {
         if (latestFrame == null) {
             return null;
@@ -1119,7 +1279,14 @@ public class PlatformPageService {
         return "/api/site/cameras/" + encodePath(deviceCode) + "/snapshot?v=" + encodePath(version);
     }
 
-    private String streamUrl(String deviceCode) {
+    private String streamUrl(String deviceCode, Document latestFrame) {
+        if (latestFrame == null) {
+            return null;
+        }
+        Optional<String> sourceStreamUrl = firstString(latestFrame, "payload.streamUrl", "normalized.streamUrl");
+        if (sourceStreamUrl.isPresent()) {
+            return sourceStreamUrl.get();
+        }
         return "/api/site/cameras/" + encodePath(deviceCode) + "/stream";
     }
 
@@ -1298,6 +1465,24 @@ public class PlatformPageService {
         return matchesText(record.detectType(), normalized)
                 || matchesText(record.alarmLevel(), normalized)
                 || matchesText(record.content(), normalized);
+    }
+
+    private String aiViolationName(String detectType) {
+        return switch (detectType == null ? "" : detectType) {
+            case "no_helmet", "helmet_missing" -> "未佩戴安全帽";
+            case "no_vest", "vest_missing" -> "未穿反光衣";
+            case "smoke", "smoking" -> "工作现场抽烟";
+            case "fire", "open_fire" -> "工作现场明火";
+            default -> detectType == null || detectType.isBlank() ? "AI识别违规" : detectType;
+        };
+    }
+
+    private BigDecimal defaultFine(String detectType) {
+        return switch (aiViolationName(detectType)) {
+            case "工作现场抽烟", "工作现场明火" -> BigDecimal.valueOf(100);
+            case "未佩戴安全帽", "未穿反光衣" -> BigDecimal.valueOf(50);
+            default -> BigDecimal.ZERO;
+        };
     }
 
     private boolean matchesText(String value, String keyword) {

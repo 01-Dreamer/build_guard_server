@@ -217,6 +217,7 @@ public final class PageDtos {
             Double confidence,
             String resultJson,
             LocalDateTime occurredAt,
+            String snapshotUrl,
             Long sourceAlarmId,
             String alarmLevel,
             Integer alarmStatus,
@@ -224,6 +225,14 @@ public final class PageDtos {
             String handleByName,
             LocalDateTime handledAt,
             String handleContent
+    ) {
+    }
+
+    public record AiRiskReviewRequest(
+            Long personnelId,
+            java.math.BigDecimal fineAmount,
+            String decision,
+            String remark
     ) {
     }
 
@@ -238,6 +247,20 @@ public final class PageDtos {
             Integer enabled,
             String snapshotUrl,
             String streamUrl
+    ) {
+    }
+
+    public record CameraVideoView(
+            Long id,
+            Long cameraDeviceId,
+            String cameraCode,
+            String cameraName,
+            String url,
+            String objectKey,
+            String fileName,
+            String contentType,
+            Long sizeBytes,
+            LocalDateTime createdAt
     ) {
     }
 }

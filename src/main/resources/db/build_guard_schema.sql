@@ -42,14 +42,48 @@ CREATE TABLE IF NOT EXISTS violation_record (
   personnel_id BIGINT DEFAULT NULL,
   violation_item VARCHAR(120) NOT NULL,
   fine_amount DECIMAL(10,2) NOT NULL DEFAULT 0.00,
-  payment_status TINYINT NOT NULL DEFAULT 0 COMMENT '0未支付 1已支付',
+  payment_status TINYINT NOT NULL DEFAULT 0 COMMENT '0未支付 1已支付 2已退款 3已撤销',
   source_alarm_id BIGINT DEFAULT NULL,
   occurred_at DATETIME(3) DEFAULT NULL,
   remark VARCHAR(255) DEFAULT NULL,
+  review_status TINYINT NOT NULL DEFAULT 1 COMMENT '1已审核 2已驳回',
   created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
   KEY idx_violation_personnel (personnel_id),
   KEY idx_violation_alarm (source_alarm_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='员工违规处理';
+
+SET @violation_review_status_exists := (
+  SELECT COUNT(*) FROM information_schema.COLUMNS
+  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'violation_record' AND COLUMN_NAME = 'review_status'
+);
+SET @violation_review_status_sql := IF(
+  @violation_review_status_exists = 0,
+  'ALTER TABLE violation_record ADD COLUMN review_status TINYINT NOT NULL DEFAULT 1 COMMENT ''0待审核 1已审核 2已驳回'' AFTER remark',
+  'SELECT 1'
+);
+PREPARE violation_review_status_stmt FROM @violation_review_status_sql;
+EXECUTE violation_review_status_stmt;
+DEALLOCATE PREPARE violation_review_status_stmt;
+
+SET @violation_updated_at_exists := (
+  SELECT COUNT(*) FROM information_schema.COLUMNS
+  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'violation_record' AND COLUMN_NAME = 'updated_at'
+);
+SET @violation_updated_at_sql := IF(
+  @violation_updated_at_exists = 0,
+  'ALTER TABLE violation_record ADD COLUMN updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3) AFTER created_at',
+  'SELECT 1'
+);
+PREPARE violation_updated_at_stmt FROM @violation_updated_at_sql;
+EXECUTE violation_updated_at_stmt;
+DEALLOCATE PREPARE violation_updated_at_stmt;
+
+UPDATE violation_record vr
+JOIN alarm_record ar ON vr.source_alarm_id = ar.id
+SET vr.review_status = CASE WHEN ar.status = 2 THEN 1 ELSE 0 END,
+    vr.updated_at = CURRENT_TIMESTAMP(3)
+WHERE vr.source_alarm_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS email_template (
   id BIGINT PRIMARY KEY AUTO_INCREMENT,
@@ -358,12 +392,47 @@ CREATE TABLE IF NOT EXISTS ai_detection_record (
   detect_type VARCHAR(40) NOT NULL,
   confidence DECIMAL(8,6) DEFAULT NULL,
   snapshot_file_id BIGINT DEFAULT NULL,
+  source_alarm_id BIGINT DEFAULT NULL,
   result_json JSON DEFAULT NULL,
   occurred_at DATETIME(3) NOT NULL,
   created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   KEY idx_ai_detection_task (task_id),
+  KEY idx_ai_detection_alarm (source_alarm_id),
   KEY idx_ai_detection_time (occurred_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='AI检测结果';
+
+CREATE TABLE IF NOT EXISTS fine_payment_order (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  violation_id BIGINT NOT NULL,
+  out_trade_no VARCHAR(80) NOT NULL,
+  trade_no VARCHAR(80) DEFAULT NULL,
+  amount DECIMAL(10,2) NOT NULL,
+  subject VARCHAR(160) NOT NULL,
+  qr_code VARCHAR(1024) DEFAULT NULL,
+  pay_status TINYINT NOT NULL DEFAULT 0 COMMENT '0待支付 1已支付 2已退款',
+  expire_at DATETIME(3) DEFAULT NULL,
+  paid_at DATETIME(3) DEFAULT NULL,
+  refunded_at DATETIME(3) DEFAULT NULL,
+  refund_no VARCHAR(80) DEFAULT NULL,
+  raw_response TEXT DEFAULT NULL,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+  UNIQUE KEY uk_fine_payment_order_no (out_trade_no),
+  KEY idx_fine_payment_violation (violation_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='罚款支付订单';
+
+SET @ai_detection_source_alarm_exists := (
+  SELECT COUNT(*) FROM information_schema.COLUMNS
+  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'ai_detection_record' AND COLUMN_NAME = 'source_alarm_id'
+);
+SET @ai_detection_source_alarm_sql := IF(
+  @ai_detection_source_alarm_exists = 0,
+  'ALTER TABLE ai_detection_record ADD COLUMN source_alarm_id BIGINT DEFAULT NULL AFTER snapshot_file_id',
+  'SELECT 1'
+);
+PREPARE ai_detection_source_alarm_stmt FROM @ai_detection_source_alarm_sql;
+EXECUTE ai_detection_source_alarm_stmt;
+DEALLOCATE PREPARE ai_detection_source_alarm_stmt;
 
 CREATE TABLE IF NOT EXISTS ai_model_config (
   id BIGINT PRIMARY KEY AUTO_INCREMENT,
@@ -381,11 +450,28 @@ CREATE TABLE IF NOT EXISTS file_resource (
   url VARCHAR(500) DEFAULT NULL,
   file_name VARCHAR(160) DEFAULT NULL,
   content_type VARCHAR(80) DEFAULT NULL,
+  size_bytes BIGINT DEFAULT NULL,
   biz_type VARCHAR(40) DEFAULT NULL,
   biz_id BIGINT DEFAULT NULL,
   created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   UNIQUE KEY uk_file_object (bucket, object_key)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='OSS文件元数据';
+
+SET @file_resource_size_bytes_exists := (
+  SELECT COUNT(*)
+  FROM information_schema.COLUMNS
+  WHERE TABLE_SCHEMA = DATABASE()
+    AND TABLE_NAME = 'file_resource'
+    AND COLUMN_NAME = 'size_bytes'
+);
+SET @file_resource_size_bytes_sql := IF(
+  @file_resource_size_bytes_exists = 0,
+  'ALTER TABLE file_resource ADD COLUMN size_bytes BIGINT DEFAULT NULL AFTER content_type',
+  'SELECT 1'
+);
+PREPARE file_resource_size_bytes_stmt FROM @file_resource_size_bytes_sql;
+EXECUTE file_resource_size_bytes_stmt;
+DEALLOCATE PREPARE file_resource_size_bytes_stmt;
 
 CREATE TABLE IF NOT EXISTS mq_message_log (
   id BIGINT PRIMARY KEY AUTO_INCREMENT,

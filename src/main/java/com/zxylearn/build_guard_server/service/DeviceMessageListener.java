@@ -40,6 +40,8 @@ import java.util.stream.Collectors;
 public class DeviceMessageListener {
     private static final long LATEST_TTL_MINUTES = 10;
     private static final long ALARM_DEDUPE_TTL_MINUTES = 5;
+    private static final long CAMERA_AI_INTERVAL_SECONDS = 5;
+    private static final long TOWER_PREDICTION_INTERVAL_SECONDS = 30;
 
     private final ObjectMapper objectMapper;
     private final MongoTemplate mongoTemplate;
@@ -50,6 +52,7 @@ public class DeviceMessageListener {
     private final MonitorRuleMapper monitorRuleMapper;
     private final AlarmRecordMapper alarmRecordMapper;
     private final MqMessageLogMapper mqMessageLogMapper;
+    private final AiTaskService aiTaskService;
 
     public DeviceMessageListener(ObjectMapper objectMapper,
                                  MongoTemplate mongoTemplate,
@@ -59,7 +62,8 @@ public class DeviceMessageListener {
                                  MonitorPointMapper monitorPointMapper,
                                  MonitorRuleMapper monitorRuleMapper,
                                  AlarmRecordMapper alarmRecordMapper,
-                                 MqMessageLogMapper mqMessageLogMapper) {
+                                 MqMessageLogMapper mqMessageLogMapper,
+                                 AiTaskService aiTaskService) {
         this.objectMapper = objectMapper;
         this.mongoTemplate = mongoTemplate;
         this.redisTemplate = redisTemplate;
@@ -69,35 +73,99 @@ public class DeviceMessageListener {
         this.monitorRuleMapper = monitorRuleMapper;
         this.alarmRecordMapper = alarmRecordMapper;
         this.mqMessageLogMapper = mqMessageLogMapper;
+        this.aiTaskService = aiTaskService;
     }
 
     @RabbitListener(queues = MqNames.DEVICE_TELEMETRY_QUEUE)
     public void onTelemetry(String messageJson) {
-        handleMessage(messageJson, MqNames.DEVICE_TELEMETRY_QUEUE, message -> {
-            persistTelemetry(message);
-            updateLatest(message, messageJson);
-            checkMonitorRules(message);
-        });
+        handleMessage(messageJson, MqNames.DEVICE_TELEMETRY_QUEUE, this::handleTelemetry);
     }
 
     @RabbitListener(queues = MqNames.DEVICE_STATUS_QUEUE)
     public void onStatus(String messageJson) {
-        handleMessage(messageJson, MqNames.DEVICE_STATUS_QUEUE, message -> {
-            persistRaw(message, "device_telemetry_raw");
-            updateDeviceStatus(message);
-        });
+        handleMessage(messageJson, MqNames.DEVICE_STATUS_QUEUE, this::handleStatus);
     }
 
     @RabbitListener(queues = MqNames.CAMERA_FRAME_QUEUE)
     public void onCameraFrame(String messageJson) {
-        handleMessage(messageJson, MqNames.CAMERA_FRAME_QUEUE, message -> {
-            persistRaw(message, "camera_frame_event");
-            updateLatest(message, messageJson);
-        });
+        handleMessage(messageJson, MqNames.CAMERA_FRAME_QUEUE, this::handleCameraFrame);
+    }
+
+    public void handleDeviceMessage(Map<String, Object> message, String sourceTopic) {
+        String eventType = String.valueOf(message.getOrDefault("eventType", ""));
+        String topic = sourceTopic == null || sourceTopic.isBlank() ? eventType : sourceTopic;
+        Consumer<Map<String, Object>> handler = switch (eventType) {
+            case "device.telemetry" -> this::handleTelemetry;
+            case "device.status" -> this::handleStatus;
+            case "camera.frame" -> this::handleCameraFrame;
+            default -> ignored -> {
+            };
+        };
+        handleMessage(message, topic, handler);
+    }
+
+    private void handleTelemetry(Map<String, Object> message) {
+        persistTelemetry(message);
+        updateLatest(message, toJson(message));
+        checkMonitorRules(message);
+        dispatchPredictionIfNeeded(message);
+    }
+
+    private void handleStatus(Map<String, Object> message) {
+        persistRaw(message, "device_telemetry_raw");
+        updateDeviceStatus(message);
+    }
+
+    private void handleCameraFrame(Map<String, Object> message) {
+        persistRaw(message, "camera_frame_event");
+        updateLatest(message, toJson(message));
+        dispatchCameraAiIfNeeded(message);
+    }
+
+    private void dispatchCameraAiIfNeeded(Map<String, Object> message) {
+        String deviceCode = String.valueOf(message.getOrDefault("deviceCode", ""));
+        if (deviceCode.isBlank() || !shouldDispatchAiTask("camera_yolo", deviceCode, CAMERA_AI_INTERVAL_SECONDS)) {
+            return;
+        }
+        aiTaskService.createCameraFrameTask(message);
+    }
+
+    private void dispatchPredictionIfNeeded(Map<String, Object> message) {
+        String deviceType = String.valueOf(message.getOrDefault("deviceType", ""));
+        String deviceCode = String.valueOf(message.getOrDefault("deviceCode", ""));
+        if (deviceCode.isBlank()) {
+            return;
+        }
+        if (!List.of("tower_crane", "environment_sensor", "elevator", "formwork", "deep_pit").contains(deviceType)) {
+            return;
+        }
+        String taskType = deviceType + "_prediction";
+        if (!shouldDispatchAiTask(taskType, deviceCode, TOWER_PREDICTION_INTERVAL_SECONDS)) {
+            return;
+        }
+        aiTaskService.createPredictionTask(message);
+    }
+
+    private boolean shouldDispatchAiTask(String taskType, String deviceCode, long ttlSeconds) {
+        try {
+            Boolean created = redisTemplate.opsForValue().setIfAbsent(
+                    "buildguard:ai:dispatch:" + taskType + ":" + deviceCode,
+                    String.valueOf(System.currentTimeMillis()),
+                    ttlSeconds,
+                    TimeUnit.SECONDS
+            );
+            return Boolean.TRUE.equals(created);
+        } catch (RuntimeException ignored) {
+            return true;
+        }
     }
 
     private void handleMessage(String messageJson, String topic, Consumer<Map<String, Object>> handler) {
         Map<String, Object> message = parse(messageJson);
+        handleMessage(message, topic, handler);
+    }
+
+    private void handleMessage(Map<String, Object> message, String topic, Consumer<Map<String, Object>> handler) {
         if (alreadyConsumed(message)) {
             return;
         }
@@ -108,6 +176,14 @@ public class DeviceMessageListener {
         } catch (RuntimeException exception) {
             logConsumed(message, topic, 2, trimError(exception.getMessage()));
             throw exception;
+        }
+    }
+
+    private String toJson(Map<String, Object> message) {
+        try {
+            return objectMapper.writeValueAsString(message);
+        } catch (Exception ignored) {
+            return "{}";
         }
     }
 

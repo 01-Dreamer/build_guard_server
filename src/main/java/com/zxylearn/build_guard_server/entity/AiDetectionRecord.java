@@ -20,6 +20,7 @@ public class AiDetectionRecord {
     private String detectType;
     private BigDecimal confidence;
     private Long snapshotFileId;
+    private Long sourceAlarmId;
     @TableField("result_json")
     private String resultJson;
     private LocalDateTime occurredAt;

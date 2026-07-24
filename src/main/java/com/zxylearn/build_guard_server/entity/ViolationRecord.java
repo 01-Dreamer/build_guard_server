@@ -20,5 +20,7 @@ public class ViolationRecord {
     private Long sourceAlarmId;
     private LocalDateTime occurredAt;
     private String remark;
+    private Integer reviewStatus;
     private LocalDateTime createdAt;
+    private LocalDateTime updatedAt;
 }
