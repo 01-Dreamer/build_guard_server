@@ -63,7 +63,10 @@ import org.springframework.data.domain.Sort;
 import org.springframework.data.mongodb.core.MongoTemplate;
 import org.springframework.data.mongodb.core.query.Criteria;
 import org.springframework.data.mongodb.core.query.Query;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
+import tools.jackson.core.type.TypeReference;
+import tools.jackson.databind.ObjectMapper;
 
 import java.math.BigDecimal;
 import java.net.URI;
@@ -71,6 +74,7 @@ import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
@@ -80,7 +84,9 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
 @Service
@@ -92,6 +98,15 @@ public class PlatformPageService {
             "formwork", "formwork_telemetry",
             "deep_pit", "deep_pit_telemetry",
             "environment_sensor", "environment_telemetry"
+    );
+    private static final List<EnvironmentMonitorSeed> DEFAULT_ENVIRONMENT_MONITORS = List.of(
+            new EnvironmentMonitorSeed("环境PM2.5监测点", "MP-ENV-001-PM25", "pm25", "PM2.5", "ug/m3", 10, bd("60.00"), null, bd("75.00"), null),
+            new EnvironmentMonitorSeed("环境PM10监测点", "MP-ENV-001-PM10", "pm10", "PM10", "ug/m3", 11, bd("120.00"), null, bd("150.00"), null),
+            new EnvironmentMonitorSeed("环境噪音监测点", "MP-ENV-001-NOISE", "noise", "噪音", "dB", 12, bd("68.00"), null, bd("75.00"), null),
+            new EnvironmentMonitorSeed("环境温度监测点", "MP-ENV-001-TEMPERATURE", "temperature", "温度", "C", 13, bd("35.00"), bd("5.00"), bd("40.00"), bd("0.00")),
+            new EnvironmentMonitorSeed("环境湿度监测点", "MP-ENV-001-HUMIDITY", "humidity", "湿度", "%RH", 14, bd("85.00"), bd("20.00"), bd("95.00"), bd("10.00")),
+            new EnvironmentMonitorSeed("环境风速监测点", "MP-ENV-001-WIND-SPEED", "windSpeed", "风速", "m/s", 15, bd("10.80"), null, bd("13.80"), null),
+            new EnvironmentMonitorSeed("环境TSP监测点", "MP-ENV-001-TSP", "tsp", "TSP", "ug/m3", 16, bd("250.00"), null, bd("300.00"), null)
     );
 
     private final DeviceAssetMapper deviceAssetMapper;
@@ -111,6 +126,9 @@ public class PlatformPageService {
     private final FileResourceMapper fileResourceMapper;
     private final ViolationRecordMapper violationRecordMapper;
     private final MongoTemplate mongoTemplate;
+    private final StringRedisTemplate redisTemplate;
+    private final ObjectMapper objectMapper;
+    private final Map<String, LocalCacheEntry> localPageCache = new ConcurrentHashMap<>();
 
     public PlatformPageService(DeviceAssetMapper deviceAssetMapper,
                                DeviceTypeMapper deviceTypeMapper,
@@ -128,7 +146,9 @@ public class PlatformPageService {
                                CameraDeviceProfileMapper cameraDeviceProfileMapper,
                                FileResourceMapper fileResourceMapper,
                                ViolationRecordMapper violationRecordMapper,
-                               MongoTemplate mongoTemplate) {
+                               MongoTemplate mongoTemplate,
+                               StringRedisTemplate redisTemplate,
+                               ObjectMapper objectMapper) {
         this.deviceAssetMapper = deviceAssetMapper;
         this.deviceTypeMapper = deviceTypeMapper;
         this.deviceLocationMapper = deviceLocationMapper;
@@ -146,9 +166,21 @@ public class PlatformPageService {
         this.fileResourceMapper = fileResourceMapper;
         this.violationRecordMapper = violationRecordMapper;
         this.mongoTemplate = mongoTemplate;
+        this.redisTemplate = redisTemplate;
+        this.objectMapper = objectMapper;
     }
 
     public DashboardOverview dashboardOverview() {
+        return cached(
+                "buildguard:page:dashboard:overview",
+                new TypeReference<DashboardOverview>() {
+                },
+                Duration.ofSeconds(2),
+                this::buildDashboardOverview
+        );
+    }
+
+    private DashboardOverview buildDashboardOverview() {
         List<DeviceAsset> devices = allDevices();
         long online = devices.stream().filter(device -> Integer.valueOf(1).equals(device.getOnlineStatus())).count();
         Integer openAlarms = Math.toIntExact(alarmRecordMapper.selectCount(
@@ -172,8 +204,19 @@ public class PlatformPageService {
     }
 
     public DeviceOverview deviceOverview() {
+        return cached(
+                "buildguard:page:construction-devices:overview",
+                new TypeReference<DeviceOverview>() {
+                },
+                Duration.ofSeconds(2),
+                this::buildDeviceOverview
+        );
+    }
+
+    private DeviceOverview buildDeviceOverview() {
         List<DeviceAsset> devices = allDevices();
         Map<Long, DeviceType> typeMap = typeMap();
+        List<String> constructionTypes = List.of("device", "tower_crane", "elevator", "formwork", "deep_pit");
         List<DeviceCard> cards = devices.stream()
                 .filter(device -> isConstructionDevice(typeMap.get(device.getTypeId())))
                 .map(device -> deviceCard(device, typeMap))
@@ -181,12 +224,22 @@ public class PlatformPageService {
         return new DeviceOverview(
                 cards.size(),
                 Math.toIntExact(cards.stream().filter(card -> Integer.valueOf(1).equals(card.onlineStatus())).count()),
+                Math.toIntExact(alarmRecordMapper.selectCount(
+                        Wrappers.<AlarmRecord>lambdaQuery()
+                                .in(AlarmRecord::getAlarmType, constructionTypes)
+                                .eq(AlarmRecord::getAlarmLevel, "alarm")
+                )),
+                Math.toIntExact(alarmRecordMapper.selectCount(
+                        Wrappers.<AlarmRecord>lambdaQuery()
+                                .in(AlarmRecord::getAlarmType, constructionTypes)
+                                .ne(AlarmRecord::getAlarmLevel, "alarm")
+                )),
                 countByType(devices, typeMap, "tower_crane"),
                 countByType(devices, typeMap, "elevator"),
                 countByType(devices, typeMap, "formwork"),
                 countByType(devices, typeMap, "deep_pit"),
                 cards,
-                listAlarms(null, List.of("device", "tower_crane", "elevator", "formwork", "deep_pit"), null, null, null, null, null, 1, 5).records()
+                latestAlarms(constructionTypes, 5)
         );
     }
 
@@ -207,6 +260,125 @@ public class PlatformPageService {
                 .map(device -> deviceMonitor(device, typeMap))
                 .toList();
         return new PageResult<>(records, filtered.size(), safePage, safePageSize);
+    }
+
+    public List<ChartPoint> constructionAlarmTrend(String typeCode) {
+        String normalizedType = typeCode == null || typeCode.isBlank() ? "all" : typeCode.trim();
+        return cached(
+                "buildguard:page:construction-devices:alarm-trend:" + normalizedType,
+                new TypeReference<List<ChartPoint>>() {
+                },
+                Duration.ofSeconds(10),
+                () -> buildConstructionAlarmTrend(typeCode)
+        );
+    }
+
+    private List<ChartPoint> buildConstructionAlarmTrend(String typeCode) {
+        LocalDate startDate = LocalDate.now().minusDays(6);
+        List<String> types = typeCode == null || typeCode.isBlank()
+                ? List.of("device", "tower_crane", "elevator", "formwork", "deep_pit")
+                : List.of(typeCode.trim());
+        List<AlarmRecord> alarms = alarmRecordMapper.selectList(
+                Wrappers.<AlarmRecord>lambdaQuery()
+                        .in(AlarmRecord::getAlarmType, types)
+                        .ge(AlarmRecord::getOccurredAt, startDate.atStartOfDay())
+        );
+
+        return java.util.stream.IntStream.rangeClosed(0, 6)
+                .mapToObj(startDate::plusDays)
+                .map(date -> {
+                    double alarmCount = alarms.stream()
+                            .filter(alarm -> alarm.getOccurredAt() != null)
+                            .filter(alarm -> alarm.getOccurredAt().toLocalDate().equals(date))
+                            .filter(alarm -> "alarm".equalsIgnoreCase(alarm.getAlarmLevel()))
+                            .count();
+                    double warningCount = alarms.stream()
+                            .filter(alarm -> alarm.getOccurredAt() != null)
+                            .filter(alarm -> alarm.getOccurredAt().toLocalDate().equals(date))
+                            .filter(alarm -> !"alarm".equalsIgnoreCase(alarm.getAlarmLevel()))
+                            .count();
+                    return new ChartPoint(date.atStartOfDay(), Map.of(
+                            "alarm", alarmCount,
+                            "warning", warningCount
+                    ));
+                })
+                .toList();
+    }
+
+    public List<MetricValue> constructionAlarmTypeSummary(String typeCode) {
+        String normalizedType = typeCode == null || typeCode.isBlank() ? "all" : typeCode.trim();
+        return cached(
+                "buildguard:page:construction-devices:alarm-type-summary:" + normalizedType,
+                new TypeReference<List<MetricValue>>() {
+                },
+                Duration.ofSeconds(10),
+                () -> buildConstructionAlarmTypeSummary(typeCode)
+        );
+    }
+
+    private List<MetricValue> buildConstructionAlarmTypeSummary(String typeCode) {
+        List<String> types = typeCode == null || typeCode.isBlank()
+                ? List.of("device", "tower_crane", "elevator", "formwork", "deep_pit")
+                : List.of(typeCode.trim());
+        Map<Long, MonitorPoint> pointMap = monitorPointMapper.selectList(null).stream()
+                .collect(Collectors.toMap(MonitorPoint::getId, Function.identity(), (left, right) -> left));
+        Map<String, Long> grouped = alarmRecordMapper.selectList(
+                        Wrappers.<AlarmRecord>lambdaQuery()
+                                .in(AlarmRecord::getAlarmType, types)
+                )
+                .stream()
+                .collect(Collectors.groupingBy(alarm -> {
+                    MonitorPoint point = alarm.getMonitorPointId() == null ? null : pointMap.get(alarm.getMonitorPointId());
+                    if (point != null && point.getName() != null && !point.getName().isBlank()) {
+                        return point.getName();
+                    }
+                    if (alarm.getContent() != null && !alarm.getContent().isBlank()) {
+                        return alarm.getContent();
+                    }
+                    return alarm.getAlarmType() == null ? "设备报警" : alarm.getAlarmType();
+                }, Collectors.counting()));
+
+        return grouped.entrySet().stream()
+                .sorted(Map.Entry.<String, Long>comparingByValue().reversed())
+                .limit(6)
+                .map(entry -> new MetricValue(entry.getKey(), entry.getKey(), entry.getValue().doubleValue(), null, null))
+                .toList();
+    }
+
+    private <T> T cached(String key, TypeReference<T> typeReference, Duration ttl, Supplier<T> supplier) {
+        long now = System.currentTimeMillis();
+        LocalCacheEntry localEntry = localPageCache.get(key);
+        if (localEntry != null) {
+            if (localEntry.expiresAtMillis() > now) {
+                @SuppressWarnings("unchecked")
+                T value = (T) localEntry.value();
+                return value;
+            }
+            localPageCache.remove(key);
+        }
+
+        try {
+            String cachedJson = redisTemplate.opsForValue().get(key);
+            if (cachedJson != null && !cachedJson.isBlank()) {
+                T value = objectMapper.readValue(cachedJson, typeReference);
+                localPageCache.put(key, new LocalCacheEntry(value, now + ttl.toMillis()));
+                return value;
+            }
+        } catch (Exception ignored) {
+            // Redis is an acceleration layer. Page APIs must still work when cache is unavailable.
+        }
+
+        T value = supplier.get();
+        localPageCache.put(key, new LocalCacheEntry(value, System.currentTimeMillis() + ttl.toMillis()));
+        try {
+            redisTemplate.opsForValue().set(key, objectMapper.writeValueAsString(value), ttl);
+        } catch (Exception ignored) {
+            // Ignore cache write failures for local development and transient Redis outages.
+        }
+        return value;
+    }
+
+    private record LocalCacheEntry(Object value, long expiresAtMillis) {
     }
 
     public PageResult<OnlineRecordView> onlineRecords(String deviceCode, int page, int pageSize) {
@@ -401,6 +573,9 @@ public class PlatformPageService {
     }
 
     public PageResult<MonitorPointView> monitorPoints(boolean environmentOnly, String name, String typeKeyword, int page, int pageSize) {
+        if (environmentOnly) {
+            ensureDefaultEnvironmentMonitorPoints();
+        }
         int safePage = safePage(page);
         int safePageSize = safePageSize(pageSize);
         Map<Long, DeviceAsset> deviceMap = deviceMap();
@@ -497,6 +672,37 @@ public class PlatformPageService {
             monitorRuleMapper.insert(rule);
         } else {
             monitorRuleMapper.updateById(rule);
+        }
+    }
+
+    private void ensureDefaultEnvironmentMonitorPoints() {
+        DeviceAsset environmentDevice = deviceAssetMapper.selectOne(
+                Wrappers.<DeviceAsset>lambdaQuery()
+                        .eq(DeviceAsset::getCode, "ENV-001")
+                        .last("LIMIT 1")
+        );
+        if (environmentDevice == null || environmentDevice.getId() == null) {
+            return;
+        }
+        for (EnvironmentMonitorSeed seed : DEFAULT_ENVIRONMENT_MONITORS) {
+            MonitorPoint point = monitorPointMapper.selectOne(
+                    Wrappers.<MonitorPoint>lambdaQuery()
+                            .eq(MonitorPoint::getCode, seed.code())
+                            .last("LIMIT 1")
+            );
+            if (point == null) {
+                point = new MonitorPoint();
+                point.setName(seed.name());
+                point.setCode(seed.code());
+                point.setDeviceId(environmentDevice.getId());
+                point.setMetricCode(seed.metricCode());
+                point.setMetricName(seed.metricName());
+                point.setUnit(seed.unit());
+                point.setSort(seed.sort());
+                point.setStatus(1);
+                monitorPointMapper.insert(point);
+            }
+            upsertMonitorRule(point.getId(), seed.warnUpper(), seed.warnLower(), seed.alarmUpper(), seed.alarmLower(), 1);
         }
     }
 
@@ -881,6 +1087,8 @@ public class PlatformPageService {
                 type == null ? null : type.getName(),
                 location == null ? null : location.getName(),
                 device.getOnlineStatus(),
+                device.getX(),
+                device.getY(),
                 realtimeMetrics(device)
         );
     }
@@ -1176,11 +1384,16 @@ public class PlatformPageService {
     }
 
     private List<AlarmView> latestAlarms(int limit) {
+        return latestAlarms(null, limit);
+    }
+
+    private List<AlarmView> latestAlarms(List<String> types, int limit) {
         Map<Long, DeviceAsset> deviceMap = deviceMap();
         Map<Long, MonitorPoint> pointMap = monitorPointMapper.selectList(null).stream()
                 .collect(Collectors.toMap(MonitorPoint::getId, Function.identity(), (left, right) -> left));
         return alarmRecordMapper.selectList(
                         Wrappers.<AlarmRecord>lambdaQuery()
+                                .in(types != null && !types.isEmpty(), AlarmRecord::getAlarmType, types)
                                 .orderByDesc(AlarmRecord::getOccurredAt)
                                 .last("LIMIT " + Math.max(1, limit))
                 )
@@ -1525,5 +1738,23 @@ public class PlatformPageService {
 
     private double round(double value) {
         return Math.round(value * 100.0) / 100.0;
+    }
+
+    private static BigDecimal bd(String value) {
+        return new BigDecimal(value);
+    }
+
+    private record EnvironmentMonitorSeed(
+            String name,
+            String code,
+            String metricCode,
+            String metricName,
+            String unit,
+            int sort,
+            BigDecimal warnUpper,
+            BigDecimal warnLower,
+            BigDecimal alarmUpper,
+            BigDecimal alarmLower
+    ) {
     }
 }

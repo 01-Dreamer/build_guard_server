@@ -3,14 +3,18 @@ package com.zxylearn.build_guard_server.controller;
 import com.zxylearn.build_guard_server.common.ApiResponse;
 import com.zxylearn.build_guard_server.common.PageResult;
 import com.zxylearn.build_guard_server.dto.PageDtos.AlarmView;
+import com.zxylearn.build_guard_server.dto.PageDtos.ChartPoint;
 import com.zxylearn.build_guard_server.dto.PageDtos.DeviceMonitorView;
 import com.zxylearn.build_guard_server.dto.PageDtos.DeviceOverview;
+import com.zxylearn.build_guard_server.dto.PageDtos.MetricValue;
 import com.zxylearn.build_guard_server.dto.PageDtos.OnlineRecordView;
 import com.zxylearn.build_guard_server.service.PlatformPageService;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+
+import java.util.List;
 
 @RestController
 @RequestMapping("/api/construction-devices")
@@ -24,6 +28,16 @@ public class ConstructionDeviceController {
     @GetMapping("/overview")
     public ApiResponse<DeviceOverview> overview() {
         return ApiResponse.ok(platformPageService.deviceOverview());
+    }
+
+    @GetMapping("/alarm-trend")
+    public ApiResponse<List<ChartPoint>> alarmTrend(@RequestParam(required = false) String typeCode) {
+        return ApiResponse.ok(platformPageService.constructionAlarmTrend(typeCode));
+    }
+
+    @GetMapping("/alarm-type-summary")
+    public ApiResponse<List<MetricValue>> alarmTypeSummary(@RequestParam(required = false) String typeCode) {
+        return ApiResponse.ok(platformPageService.constructionAlarmTypeSummary(typeCode));
     }
 
     @GetMapping("/tower-cranes")

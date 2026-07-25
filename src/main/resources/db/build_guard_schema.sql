@@ -715,6 +715,30 @@ FROM device_asset d
 WHERE d.code = 'ENV-001'
   AND NOT EXISTS (SELECT 1 FROM monitor_point WHERE code = 'MP-ENV-001-NOISE');
 
+INSERT INTO monitor_point (name, code, device_id, metric_code, metric_name, unit, sort, status)
+SELECT '环境温度监测点', 'MP-ENV-001-TEMPERATURE', d.id, 'temperature', '温度', 'C', 13, 1
+FROM device_asset d
+WHERE d.code = 'ENV-001'
+  AND NOT EXISTS (SELECT 1 FROM monitor_point WHERE code = 'MP-ENV-001-TEMPERATURE');
+
+INSERT INTO monitor_point (name, code, device_id, metric_code, metric_name, unit, sort, status)
+SELECT '环境湿度监测点', 'MP-ENV-001-HUMIDITY', d.id, 'humidity', '湿度', '%RH', 14, 1
+FROM device_asset d
+WHERE d.code = 'ENV-001'
+  AND NOT EXISTS (SELECT 1 FROM monitor_point WHERE code = 'MP-ENV-001-HUMIDITY');
+
+INSERT INTO monitor_point (name, code, device_id, metric_code, metric_name, unit, sort, status)
+SELECT '环境风速监测点', 'MP-ENV-001-WIND-SPEED', d.id, 'windSpeed', '风速', 'm/s', 15, 1
+FROM device_asset d
+WHERE d.code = 'ENV-001'
+  AND NOT EXISTS (SELECT 1 FROM monitor_point WHERE code = 'MP-ENV-001-WIND-SPEED');
+
+INSERT INTO monitor_point (name, code, device_id, metric_code, metric_name, unit, sort, status)
+SELECT '环境TSP监测点', 'MP-ENV-001-TSP', d.id, 'tsp', 'TSP', 'ug/m3', 16, 1
+FROM device_asset d
+WHERE d.code = 'ENV-001'
+  AND NOT EXISTS (SELECT 1 FROM monitor_point WHERE code = 'MP-ENV-001-TSP');
+
 INSERT INTO monitor_rule (monitor_point_id, warn_upper, warn_lower, alarm_upper, alarm_lower, enabled)
 SELECT mp.id, 8.00, NULL, 10.00, NULL, 1
 FROM monitor_point mp
@@ -761,6 +785,30 @@ INSERT INTO monitor_rule (monitor_point_id, warn_upper, warn_lower, alarm_upper,
 SELECT mp.id, 68.00, NULL, 75.00, NULL, 1
 FROM monitor_point mp
 WHERE mp.code = 'MP-ENV-001-NOISE'
+  AND NOT EXISTS (SELECT 1 FROM monitor_rule WHERE monitor_point_id = mp.id);
+
+INSERT INTO monitor_rule (monitor_point_id, warn_upper, warn_lower, alarm_upper, alarm_lower, enabled)
+SELECT mp.id, 35.00, 5.00, 40.00, 0.00, 1
+FROM monitor_point mp
+WHERE mp.code = 'MP-ENV-001-TEMPERATURE'
+  AND NOT EXISTS (SELECT 1 FROM monitor_rule WHERE monitor_point_id = mp.id);
+
+INSERT INTO monitor_rule (monitor_point_id, warn_upper, warn_lower, alarm_upper, alarm_lower, enabled)
+SELECT mp.id, 85.00, 20.00, 95.00, 10.00, 1
+FROM monitor_point mp
+WHERE mp.code = 'MP-ENV-001-HUMIDITY'
+  AND NOT EXISTS (SELECT 1 FROM monitor_rule WHERE monitor_point_id = mp.id);
+
+INSERT INTO monitor_rule (monitor_point_id, warn_upper, warn_lower, alarm_upper, alarm_lower, enabled)
+SELECT mp.id, 10.80, NULL, 13.80, NULL, 1
+FROM monitor_point mp
+WHERE mp.code = 'MP-ENV-001-WIND-SPEED'
+  AND NOT EXISTS (SELECT 1 FROM monitor_rule WHERE monitor_point_id = mp.id);
+
+INSERT INTO monitor_rule (monitor_point_id, warn_upper, warn_lower, alarm_upper, alarm_lower, enabled)
+SELECT mp.id, 250.00, NULL, 300.00, NULL, 1
+FROM monitor_point mp
+WHERE mp.code = 'MP-ENV-001-TSP'
   AND NOT EXISTS (SELECT 1 FROM monitor_rule WHERE monitor_point_id = mp.id);
 
 INSERT INTO device_online_record (device_id, online_status, reported_at, source)

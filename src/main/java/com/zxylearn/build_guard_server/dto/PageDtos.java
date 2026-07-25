@@ -30,6 +30,8 @@ public final class PageDtos {
     public record DeviceOverview(
             Integer total,
             Integer online,
+            Integer totalAlarms,
+            Integer totalWarnings,
             Integer towerCranes,
             Integer elevators,
             Integer formworks,
@@ -47,6 +49,8 @@ public final class PageDtos {
             String typeName,
             String locationName,
             Integer onlineStatus,
+            Double x,
+            Double y,
             List<MetricValue> metrics
     ) {
     }

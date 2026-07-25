@@ -45,6 +45,13 @@ buildguard:
     enabled: ${BUILDGUARD_SIM_ENABLED:true}
     base-url: ${BUILDGUARD_SIM_BASE_URL:http://127.0.0.1:19099}
     poll-interval-ms: ${BUILDGUARD_SIM_POLL_INTERVAL_MS:3000}
+  camera-recording:
+    enabled: ${BUILDGUARD_CAMERA_RECORDING_ENABLED:true}
+    segment-seconds: ${BUILDGUARD_CAMERA_RECORDING_SEGMENT_SECONDS:300}
+    fps: ${BUILDGUARD_CAMERA_RECORDING_FPS:5}
+    max-cameras-per-cycle: ${BUILDGUARD_CAMERA_RECORDING_MAX_CAMERAS:4}
+    initial-delay-ms: ${BUILDGUARD_CAMERA_RECORDING_INITIAL_DELAY_MS:30000}
+    check-interval-ms: ${BUILDGUARD_CAMERA_RECORDING_CHECK_INTERVAL_MS:1000}
   storage:
     local-root: ${BUILDGUARD_STORAGE_LOCAL_ROOT:data/uploads}
     public-base-url: ${BUILDGUARD_STORAGE_PUBLIC_BASE_URL:http://127.0.0.1:18080}
