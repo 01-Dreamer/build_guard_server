@@ -33,6 +33,7 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.util.Base64;
 import java.util.Optional;
 
 @RestController
@@ -106,6 +107,21 @@ public class SiteController {
         }
     }
 
+    @GetMapping("/cameras/{code}/sse")
+    public void cameraSse(@PathVariable String code, HttpServletResponse response) {
+        response.setStatus(HttpServletResponse.SC_OK);
+        response.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0, no-transform");
+        response.setHeader("Pragma", "no-cache");
+        response.setHeader("Expires", "0");
+        response.setHeader("X-Accel-Buffering", "no");
+        response.setContentType("text/event-stream; charset=utf-8");
+        try {
+            writeCameraSse(code, response.getOutputStream());
+        } catch (IOException exception) {
+            // Client disconnected before the stream was established.
+        }
+    }
+
     private void writeCameraStream(String code, String boundary, OutputStream outputStream) {
         String lastVersion = null;
         while (!Thread.currentThread().isInterrupted()) {
@@ -132,6 +148,49 @@ public class SiteController {
 
             try {
                 Thread.sleep(80);
+            } catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+        }
+    }
+
+    private void writeCameraSse(String code, OutputStream outputStream) {
+        String lastVersion = null;
+        try {
+            outputStream.write("retry: 1000\n\n".getBytes(StandardCharsets.UTF_8));
+            outputStream.flush();
+        } catch (IOException exception) {
+            return;
+        }
+
+        while (!Thread.currentThread().isInterrupted()) {
+            Optional<CameraSnapshot> snapshot = platformPageService.cameraSnapshot(code);
+            if (snapshot.isPresent() && !snapshot.get().version().equals(lastVersion)) {
+                CameraSnapshot current = snapshot.get();
+                try {
+                    byte[] frame = Files.readAllBytes(current.path());
+                    outputStream.write(("id: " + current.version() + "\n").getBytes(StandardCharsets.UTF_8));
+                    outputStream.write("event: frame\n".getBytes(StandardCharsets.UTF_8));
+                    outputStream.write("data: ".getBytes(StandardCharsets.UTF_8));
+                    outputStream.write(Base64.getEncoder().encode(frame));
+                    outputStream.write("\n\n".getBytes(StandardCharsets.UTF_8));
+                    outputStream.flush();
+                    lastVersion = current.version();
+                } catch (IOException exception) {
+                    return;
+                }
+            } else {
+                try {
+                    outputStream.write(": ping\n\n".getBytes(StandardCharsets.UTF_8));
+                    outputStream.flush();
+                } catch (IOException exception) {
+                    return;
+                }
+            }
+
+            try {
+                Thread.sleep(250);
             } catch (InterruptedException exception) {
                 Thread.currentThread().interrupt();
                 return;

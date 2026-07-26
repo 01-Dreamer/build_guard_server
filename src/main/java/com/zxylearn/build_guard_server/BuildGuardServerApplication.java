@@ -1,13 +1,16 @@
 package com.zxylearn.build_guard_server;
 
+import com.zxylearn.build_guard_server.config.AiChatConfig;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.mybatis.spring.annotation.MapperScan;
 import org.springframework.amqp.rabbit.annotation.EnableRabbit;
 import org.springframework.scheduling.annotation.EnableScheduling;
 
 @SpringBootApplication
 @MapperScan("com.zxylearn.build_guard_server.mapper")
+@EnableConfigurationProperties(AiChatConfig.class)
 @EnableRabbit
 @EnableScheduling
 public class BuildGuardServerApplication {

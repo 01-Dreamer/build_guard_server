@@ -1,18 +1,38 @@
-# Maven / build output
-target/
+# BuildGuard server ignore rules
 
-# Runtime / crash logs
-*.log
+# Maven / Gradle / build output
+target/
+build/
+out/
+*.class
+
+# Runtime data, uploads, cache and generated files
+data/
 logs/
+uploads/
+tmp/
+temp/
+oss-cache/
+camera-segments/
+*.log
+*.pid
 hs_err_pid*
 replay_pid*
+*.hprof
+*.dump
+*.db
+*.sqlite
+*.sqlite3
 
-# Environment
+# Local environment and secrets
 .env
 .env.*
 !.env.example
 src/main/resources/application.yml
 src/main/resources/application.properties
+src/main/resources/application-*.yml
+src/main/resources/application-*.properties
+!src/main/resources/application-example.yml
 application-local.yml
 application-local.properties
 

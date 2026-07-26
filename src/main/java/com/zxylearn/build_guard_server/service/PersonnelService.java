@@ -62,7 +62,7 @@ public class PersonnelService {
                             FinePaymentService finePaymentService,
                             JavaMailSender mailSender,
                             @Value("${spring.mail.username:}") String mailFrom,
-                            @Value("${buildguard.public-base-url:http://SERVER_IP_PLACEHOLDER:18080}") String publicBaseUrl) {
+                            @Value("${buildguard.public-base-url:https://data.zxylearn.top}") String publicBaseUrl) {
         this.personnelMapper = personnelMapper;
         this.violationRecordMapper = violationRecordMapper;
         this.alarmRecordMapper = alarmRecordMapper;

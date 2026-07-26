@@ -85,6 +85,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CompletableFuture;
 import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
@@ -175,7 +176,7 @@ public class PlatformPageService {
                 "buildguard:page:dashboard:overview",
                 new TypeReference<DashboardOverview>() {
                 },
-                Duration.ofSeconds(2),
+                Duration.ofSeconds(5),
                 this::buildDashboardOverview
         );
     }
@@ -208,7 +209,7 @@ public class PlatformPageService {
                 "buildguard:page:construction-devices:overview",
                 new TypeReference<DeviceOverview>() {
                 },
-                Duration.ofSeconds(2),
+                Duration.ofSeconds(5),
                 this::buildDeviceOverview
         );
     }
@@ -354,6 +355,15 @@ public class PlatformPageService {
                 T value = (T) localEntry.value();
                 return value;
             }
+            if (localEntry.staleUntilMillis() > now) {
+                @SuppressWarnings("unchecked")
+                T value = (T) localEntry.value();
+                if (!localEntry.refreshing()) {
+                    localPageCache.put(key, localEntry.refreshing(now + ttl.toMillis()));
+                    CompletableFuture.runAsync(() -> refreshCache(key, ttl, supplier));
+                }
+                return value;
+            }
             localPageCache.remove(key);
         }
 
@@ -361,7 +371,7 @@ public class PlatformPageService {
             String cachedJson = redisTemplate.opsForValue().get(key);
             if (cachedJson != null && !cachedJson.isBlank()) {
                 T value = objectMapper.readValue(cachedJson, typeReference);
-                localPageCache.put(key, new LocalCacheEntry(value, now + ttl.toMillis()));
+                localPageCache.put(key, new LocalCacheEntry(value, now + ttl.toMillis(), staleUntil(now, ttl), false));
                 return value;
             }
         } catch (Exception ignored) {
@@ -369,7 +379,8 @@ public class PlatformPageService {
         }
 
         T value = supplier.get();
-        localPageCache.put(key, new LocalCacheEntry(value, System.currentTimeMillis() + ttl.toMillis()));
+        long storedAt = System.currentTimeMillis();
+        localPageCache.put(key, new LocalCacheEntry(value, storedAt + ttl.toMillis(), staleUntil(storedAt, ttl), false));
         try {
             redisTemplate.opsForValue().set(key, objectMapper.writeValueAsString(value), ttl);
         } catch (Exception ignored) {
@@ -378,7 +389,33 @@ public class PlatformPageService {
         return value;
     }
 
-    private record LocalCacheEntry(Object value, long expiresAtMillis) {
+    private <T> void refreshCache(String key, Duration ttl, Supplier<T> supplier) {
+        try {
+            T value = supplier.get();
+            long now = System.currentTimeMillis();
+            localPageCache.put(key, new LocalCacheEntry(value, now + ttl.toMillis(), staleUntil(now, ttl), false));
+            try {
+                redisTemplate.opsForValue().set(key, objectMapper.writeValueAsString(value), ttl);
+            } catch (Exception ignored) {
+                // Ignore cache write failures for local development and transient Redis outages.
+            }
+        } catch (Exception ignored) {
+            LocalCacheEntry current = localPageCache.get(key);
+            if (current != null) {
+                long now = System.currentTimeMillis();
+                localPageCache.put(key, new LocalCacheEntry(current.value(), now + ttl.toMillis(), staleUntil(now, ttl), false));
+            }
+        }
+    }
+
+    private long staleUntil(long now, Duration ttl) {
+        return now + Math.max(Duration.ofSeconds(30).toMillis(), ttl.toMillis() * 6);
+    }
+
+    private record LocalCacheEntry(Object value, long expiresAtMillis, long staleUntilMillis, boolean refreshing) {
+        private LocalCacheEntry refreshing(long nextExpiresAtMillis) {
+            return new LocalCacheEntry(value, nextExpiresAtMillis, staleUntilMillis, true);
+        }
     }
 
     public PageResult<OnlineRecordView> onlineRecords(String deviceCode, int page, int pageSize) {
@@ -1017,16 +1054,19 @@ public class PlatformPageService {
             return new PageResult<>(List.of(), 0, safePage, safePageSize);
         }
 
-        List<FileResource> filtered = fileResourceMapper.selectList(Wrappers.<FileResource>lambdaQuery()
+        LocalDateTime start = parseDateStart(startTime);
+        LocalDateTime end = parseDateEnd(endTime);
+        IPage<FileResource> result = fileResourceMapper.selectPage(
+                Page.of(safePage, safePageSize),
+                Wrappers.<FileResource>lambdaQuery()
                         .eq(FileResource::getBizType, "camera_video")
                         .in(!cameraIds.isEmpty(), FileResource::getBizId, cameraIds)
-                        .orderByDesc(FileResource::getCreatedAt))
-                .stream()
-                .filter(file -> inDateRange(file.getCreatedAt(), startTime, endTime))
-                .toList();
-        int from = Math.min((safePage - 1) * safePageSize, filtered.size());
-        int to = Math.min(from + safePageSize, filtered.size());
-        List<CameraVideoView> records = filtered.subList(from, to).stream()
+                        .ge(start != null, FileResource::getCreatedAt, start)
+                        .le(end != null, FileResource::getCreatedAt, end)
+                        .orderByDesc(FileResource::getCreatedAt)
+                        .orderByDesc(FileResource::getId)
+        );
+        List<CameraVideoView> records = result.getRecords().stream()
                 .map(file -> {
                     DeviceAsset camera = file.getBizId() == null ? null : deviceMap.get(file.getBizId());
                     return new CameraVideoView(
@@ -1043,7 +1083,7 @@ public class PlatformPageService {
                     );
                 })
                 .toList();
-        return new PageResult<>(records, filtered.size(), safePage, safePageSize);
+        return new PageResult<>(records, result.getTotal(), safePage, safePageSize);
     }
 
     private DeviceMonitorView deviceMonitor(DeviceAsset device, Map<Long, DeviceType> typeMap) {
@@ -1363,24 +1403,36 @@ public class PlatformPageService {
         int safePage = safePage(page);
         int safePageSize = safePageSize(pageSize);
         Map<Long, DeviceAsset> deviceMap = deviceMap();
+        List<Long> deviceIds = filteredDeviceIds(deviceMap, deviceName);
+        if (deviceIds != null && deviceIds.isEmpty()) {
+            return new PageResult<>(List.of(), 0, safePage, safePageSize);
+        }
+
+        String normalizedAlarmType = normalizedAlarmType(alarmType);
+        LocalDateTime start = parseDateStart(startTime);
+        LocalDateTime end = parseDateEnd(endTime);
+        IPage<AlarmRecord> result = alarmRecordMapper.selectPage(
+                Page.of(safePage, safePageSize),
+                Wrappers.<AlarmRecord>lambdaQuery()
+                        .in(types != null && !types.isEmpty(), AlarmRecord::getAlarmType, types)
+                        .eq(level != null && !level.isBlank(), AlarmRecord::getAlarmLevel, normalizedLevel(level))
+                        .eq(status != null, AlarmRecord::getStatus, status)
+                        .eq(normalizedAlarmType != null && !normalizedAlarmType.isBlank(), AlarmRecord::getAlarmType, normalizedAlarmType)
+                        .like(shouldLikeAlarmContent(alarmType), AlarmRecord::getContent, alarmType == null ? null : alarmType.trim())
+                        .in(deviceIds != null, AlarmRecord::getDeviceId, deviceIds)
+                        .ge(start != null, AlarmRecord::getOccurredAt, start)
+                        .le(end != null, AlarmRecord::getOccurredAt, end)
+                        .orderByDesc(AlarmRecord::getOccurredAt)
+                        .orderByDesc(AlarmRecord::getId)
+        );
         Map<Long, MonitorPoint> pointMap = monitorPointMapper.selectList(null).stream()
                 .collect(Collectors.toMap(MonitorPoint::getId, Function.identity(), (left, right) -> left));
-        List<AlarmView> filtered = alarmRecordMapper.selectList(
-                        Wrappers.<AlarmRecord>lambdaQuery()
-                                .in(types != null && !types.isEmpty(), AlarmRecord::getAlarmType, types)
-                                .orderByDesc(AlarmRecord::getOccurredAt)
-                )
-                .stream()
-                .map(alarm -> alarmView(alarm, deviceMap, pointMap))
-                .filter(alarm -> matchesLevel(alarm.alarmLevel(), level))
-                .filter(alarm -> status == null || status.equals(alarm.status()))
-                .filter(alarm -> matchesAlarmType(alarm, alarmType))
-                .filter(alarm -> matchesText(alarm.deviceName(), deviceName) || matchesText(alarm.deviceCode(), deviceName))
-                .filter(alarm -> inDateRange(alarm.occurredAt(), startTime, endTime))
+        Map<Long, MonitorRule> ruleMap = monitorRuleMapper.selectList(null).stream()
+                .collect(Collectors.toMap(MonitorRule::getMonitorPointId, Function.identity(), (left, right) -> left));
+        List<AlarmView> records = result.getRecords().stream()
+                .map(alarm -> alarmView(alarm, deviceMap, pointMap, ruleMap))
                 .toList();
-        int from = Math.min((safePage - 1) * safePageSize, filtered.size());
-        int to = Math.min(from + safePageSize, filtered.size());
-        return new PageResult<>(filtered.subList(from, to), filtered.size(), safePage, safePageSize);
+        return new PageResult<>(records, result.getTotal(), safePage, safePageSize);
     }
 
     private List<AlarmView> latestAlarms(int limit) {
@@ -1403,13 +1455,25 @@ public class PlatformPageService {
     }
 
     private AlarmView alarmView(AlarmRecord alarm, Map<Long, DeviceAsset> deviceMap, Map<Long, MonitorPoint> pointMap) {
+        return alarmView(alarm, deviceMap, pointMap, null);
+    }
+
+    private AlarmView alarmView(AlarmRecord alarm,
+                                Map<Long, DeviceAsset> deviceMap,
+                                Map<Long, MonitorPoint> pointMap,
+                                Map<Long, MonitorRule> ruleMap) {
         DeviceAsset device = alarm.getDeviceId() == null ? null : deviceMap.get(alarm.getDeviceId());
         MonitorPoint point = alarm.getMonitorPointId() == null ? null : pointMap.get(alarm.getMonitorPointId());
-        MonitorRule rule = point == null ? null : monitorRuleMapper.selectOne(
-                Wrappers.<MonitorRule>lambdaQuery()
-                        .eq(MonitorRule::getMonitorPointId, point.getId())
-                        .last("LIMIT 1")
-        );
+        MonitorRule rule = null;
+        if (point != null) {
+            rule = ruleMap == null
+                    ? monitorRuleMapper.selectOne(
+                    Wrappers.<MonitorRule>lambdaQuery()
+                            .eq(MonitorRule::getMonitorPointId, point.getId())
+                            .last("LIMIT 1")
+            )
+                    : ruleMap.get(point.getId());
+        }
         return new AlarmView(
                 alarm.getId(),
                 alarm.getAlarmType(),
@@ -1629,11 +1693,57 @@ public class PlatformPageService {
         if (level == null || level.isBlank()) {
             return true;
         }
-        String normalized = level.trim();
-        if ("warning".equalsIgnoreCase(normalized)) {
-            normalized = "warn";
-        }
+        String normalized = normalizedLevel(level);
         return value != null && value.equalsIgnoreCase(normalized);
+    }
+
+    private String normalizedLevel(String level) {
+        if (level == null || level.isBlank()) {
+            return null;
+        }
+        String normalized = level.trim();
+        return "warning".equalsIgnoreCase(normalized) ? "warn" : normalized;
+    }
+
+    private List<Long> filteredDeviceIds(Map<Long, DeviceAsset> deviceMap, String keyword) {
+        if (keyword == null || keyword.isBlank()) {
+            return null;
+        }
+        String normalized = keyword.trim().toLowerCase();
+        return deviceMap.values().stream()
+                .filter(device -> containsIgnoreCase(device.getName(), normalized) || containsIgnoreCase(device.getCode(), normalized))
+                .map(DeviceAsset::getId)
+                .toList();
+    }
+
+    private String normalizedAlarmType(String keyword) {
+        if (keyword == null || keyword.isBlank()) {
+            return null;
+        }
+        String normalized = keyword.trim().toLowerCase();
+        if (normalized.contains("塔吊")) {
+            return "tower_crane";
+        }
+        if (normalized.contains("升降机")) {
+            return "elevator";
+        }
+        if (normalized.contains("高支模")) {
+            return "formwork";
+        }
+        if (normalized.contains("基坑")) {
+            return "deep_pit";
+        }
+        if (normalized.contains("环境")) {
+            return "environment";
+        }
+        if (List.of("device", "tower_crane", "elevator", "formwork", "deep_pit", "environment", "ai").contains(normalized)) {
+            return normalized;
+        }
+        return null;
+    }
+
+    private boolean shouldLikeAlarmContent(String keyword) {
+        return keyword != null && !keyword.isBlank() && normalizedAlarmType(keyword) == null;
     }
 
     private boolean matchesAlarmType(AlarmView alarm, String keyword) {

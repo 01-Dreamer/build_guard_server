@@ -29,6 +29,8 @@ import com.zxylearn.build_guard_server.mapper.FinePaymentOrderMapper;
 import com.zxylearn.build_guard_server.mapper.PersonnelMapper;
 import com.zxylearn.build_guard_server.mapper.ViolationRecordMapper;
 import org.springframework.beans.factory.annotation.Value;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 import java.io.ByteArrayOutputStream;
@@ -41,6 +43,7 @@ import java.util.UUID;
 
 @Service
 public class FinePaymentService {
+    private static final Logger log = LoggerFactory.getLogger(FinePaymentService.class);
     private final ViolationRecordMapper violationRecordMapper;
     private final FinePaymentOrderMapper paymentOrderMapper;
     private final PersonnelMapper personnelMapper;
@@ -59,7 +62,7 @@ public class FinePaymentService {
                               @Value("${payment.alipay.app-id:}") String appId,
                               @Value("${payment.alipay.private-key:}") String privateKey,
                               @Value("${payment.alipay.public-key:}") String alipayPublicKey,
-                              @Value("${payment.alipay.notify-url:http://SERVER_IP_PLACEHOLDER:18080/api/payments/alipay/notify}") String notifyUrl,
+                              @Value("${payment.alipay.notify-url:https://data.zxylearn.top/api/payments/alipay/notify}") String notifyUrl,
                               @Value("${payment.alipay.charset:UTF-8}") String charset,
                               @Value("${payment.alipay.sign-type:RSA2}") String signType) {
         this.violationRecordMapper = violationRecordMapper;
@@ -67,8 +70,8 @@ public class FinePaymentService {
         this.personnelMapper = personnelMapper;
         this.gatewayUrl = trim(gatewayUrl);
         this.appId = trim(appId);
-        this.privateKey = trim(privateKey);
-        this.alipayPublicKey = trim(alipayPublicKey);
+        this.privateKey = normalizePemKey(privateKey);
+        this.alipayPublicKey = normalizePemKey(alipayPublicKey);
         this.notifyUrl = trim(notifyUrl);
         this.charset = trim(charset).isBlank() ? "UTF-8" : trim(charset);
         this.signType = trim(signType).isBlank() ? "RSA2" : trim(signType);
@@ -132,7 +135,7 @@ public class FinePaymentService {
 
     public String publicPaymentPageUrl(long violationId, String publicBaseUrl) {
         String base = publicBaseUrl == null || publicBaseUrl.isBlank()
-                ? "http://SERVER_IP_PLACEHOLDER:18080"
+                ? "https://data.zxylearn.top"
                 : publicBaseUrl.trim();
         return base.replaceAll("/+$", "") + "/api/payments/fines/" + violationId + "/pay";
     }
@@ -289,11 +292,16 @@ public class FinePaymentService {
             AlipayTradePrecreateResponse response = alipayClient().execute(request);
             order.setRawResponse(response.getBody());
             if (!response.isSuccess() || response.getQrCode() == null || response.getQrCode().isBlank()) {
-                throw new BusinessException(502, "支付宝预下单失败：" + response.getSubMsg());
+                String reason = firstNonBlank(response.getSubMsg(), response.getMsg(), response.getSubCode(), response.getCode());
+                log.warn("alipay precreate failed outTradeNo={} code={} subCode={} subMsg={} body={}",
+                        order.getOutTradeNo(), response.getCode(), response.getSubCode(), response.getSubMsg(), response.getBody());
+                throw new BusinessException(502, "支付宝预下单失败：" + reason);
             }
             return response.getQrCode();
         } catch (AlipayApiException exception) {
-            throw new BusinessException(502, "支付宝预下单失败");
+            log.warn("alipay precreate api exception outTradeNo={} appId={} gateway={} reason={}",
+                    order.getOutTradeNo(), mask(appId), gatewayUrl, exception.getMessage(), exception);
+            throw new BusinessException(502, "支付宝预下单失败：" + safeErrorMessage(exception.getMessage()));
         }
     }
 
@@ -308,10 +316,15 @@ public class FinePaymentService {
             AlipayTradeRefundResponse response = alipayClient().execute(request);
             order.setRawResponse(response.getBody());
             if (!response.isSuccess()) {
-                throw new BusinessException(502, "支付宝退款失败：" + response.getSubMsg());
+                String reason = firstNonBlank(response.getSubMsg(), response.getMsg(), response.getSubCode(), response.getCode());
+                log.warn("alipay refund failed outTradeNo={} code={} subCode={} subMsg={} body={}",
+                        order.getOutTradeNo(), response.getCode(), response.getSubCode(), response.getSubMsg(), response.getBody());
+                throw new BusinessException(502, "支付宝退款失败：" + reason);
             }
         } catch (AlipayApiException exception) {
-            throw new BusinessException(502, "支付宝退款失败");
+            log.warn("alipay refund api exception outTradeNo={} appId={} gateway={} reason={}",
+                    order.getOutTradeNo(), mask(appId), gatewayUrl, exception.getMessage(), exception);
+            throw new BusinessException(502, "支付宝退款失败：" + safeErrorMessage(exception.getMessage()));
         }
     }
 
@@ -392,5 +405,47 @@ public class FinePaymentService {
 
     private String trim(String value) {
         return value == null ? "" : value.trim();
+    }
+
+    private String normalizePemKey(String value) {
+        String text = trim(value);
+        if (text.isBlank()) {
+            return "";
+        }
+        return text
+                .replace("-----BEGIN PRIVATE KEY-----", "")
+                .replace("-----END PRIVATE KEY-----", "")
+                .replace("-----BEGIN RSA PRIVATE KEY-----", "")
+                .replace("-----END RSA PRIVATE KEY-----", "")
+                .replace("-----BEGIN PUBLIC KEY-----", "")
+                .replace("-----END PUBLIC KEY-----", "")
+                .replaceAll("\\s+", "");
+    }
+
+    private String firstNonBlank(String... values) {
+        if (values == null) {
+            return "未知错误";
+        }
+        for (String value : values) {
+            if (value != null && !value.isBlank()) {
+                return value;
+            }
+        }
+        return "未知错误";
+    }
+
+    private String safeErrorMessage(String message) {
+        if (message == null || message.isBlank()) {
+            return "请检查支付宝网关、AppId、私钥、公钥和沙箱应用配置";
+        }
+        return message.replaceAll("[\\r\\n]+", " ");
+    }
+
+    private String mask(String value) {
+        String text = trim(value);
+        if (text.length() <= 6) {
+            return text.isBlank() ? "-" : "***";
+        }
+        return text.substring(0, 3) + "***" + text.substring(text.length() - 3);
     }
 }

@@ -359,7 +359,8 @@ public class AiTaskService {
             record.setConfidence(decimalValue(detection.get("confidence")));
             record.setSnapshotFileId(snapshotFileId);
             record.setResultJson(toJson(detection));
-            record.setOccurredAt(LocalDateTime.now());
+            // 使用任务创建时间（即相机抓拍时间）而非当前处理时间
+            record.setOccurredAt(task.getCreatedAt() != null ? task.getCreatedAt() : LocalDateTime.now());
             record.setCreatedAt(LocalDateTime.now());
             aiDetectionRecordMapper.insert(record);
 
@@ -385,7 +386,7 @@ public class AiTaskService {
         violation.setFineAmount(defaultFine(record.getDetectType()));
         violation.setPaymentStatus(0);
         violation.setSourceAlarmId(alarm.getId());
-        violation.setOccurredAt(record.getOccurredAt() == null ? LocalDateTime.now() : record.getOccurredAt());
+        violation.setOccurredAt(record.getOccurredAt() != null ? record.getOccurredAt() : LocalDateTime.now());
         violation.setRemark("AI识别结果待管理员审核");
         violation.setReviewStatus(0);
         violation.setCreatedAt(LocalDateTime.now());
@@ -448,7 +449,7 @@ public class AiTaskService {
         alarm.setDeviceId(task.getDeviceId());
         alarm.setContent("AI时序预测风险：" + textValue(prediction.get("reason"), riskLevel));
         alarm.setAlarmValue(riskScore);
-        alarm.setOccurredAt(LocalDateTime.now());
+        alarm.setOccurredAt(task.getCreatedAt() != null ? task.getCreatedAt() : LocalDateTime.now());
         alarm.setStatus(0);
         alarm.setCreatedAt(LocalDateTime.now());
         alarmRecordMapper.insert(alarm);
